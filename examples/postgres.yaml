@@ -1,0 +1,39 @@
+# horchestra manifest: a PostgreSQL 18 instance pinned to node sav-01.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/postgres.yaml
+#
+# Storage lives in a separate PersistentVolume Kind, referenced by name from the
+# Application's volumeMounts: deleting the Application keeps the data; deleting the
+# PersistentVolume reclaims it.
+apiVersion: horchestra.io/v1
+kind: PersistentVolume
+metadata:
+  name: pg-data
+spec:
+  size: 10Gi          # advisory in this skeleton (a directory on the node's disk)
+  node: sav-01        # the node whose disk backs the volume (must match the app's nodeName)
+---
+apiVersion: horchestra.io/v1
+kind: Application
+metadata:
+  name: postgres-18
+spec:
+  image: docker.io/library/postgres:18-alpine
+  nodeName: sav-01                     # required: one application runs on exactly one node
+  restartPolicy: Always                # long-running service (this is also the default)
+  env:                                 # plain config only — secrets never go in env
+    POSTGRES_HOST_AUTH_METHOD: trust   # demo auth; in production mount a password file instead
+    PGDATA: /var/lib/postgresql/data   # data lands inside the mounted PersistentVolume below
+  ports:
+    - { name: postgres, port: 5432 }   # pure declaration for an external edge/LB (no data-plane)
+  resources:
+    requests: { cpu: 500m, memory: 256Mi }     # reserved on the node
+    limits:   { cpu: "1",  memory: 512Mi }     # hard caps; requests <= limits (admission-enforced)
+  volumeMounts:
+    - { pv: pg-data, path: /var/lib/postgresql }        # persistent data (the PersistentVolume above)
+    - { tmpfs: { size: 64Mi }, path: /run/postgresql }  # ephemeral unix-socket dir (in-memory, no PV)
+  # No securityContext.runAsUser here on purpose: the postgres entrypoint starts as
+  # root to initialise/chown PGDATA and then drops to the postgres user itself.
+  # Forcing a non-root uid would need an fsGroup chown of the PV directory (a
+  # follow-up); meanwhile the always-on hardened floor still applies —
+  # NoNewPrivileges, ProtectSystem=strict and a read-only overlay rootfs.
