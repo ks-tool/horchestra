@@ -35,9 +35,9 @@ func (defaulting) Validate(context.Context, *Attributes) error { return nil }
 // DefaultChain is the admission chain the controller runs. Input shape and
 // required fields are validated earlier, against the per-Kind JSON schema; the
 // chain here defaults the typed object and enforces the cross-field and policy
-// checks. lister lets nodeExists and the capacity check read the live Applications
-// and Nodes (storage.Storage satisfies it); pass nil to disable those two checks
-// (e.g. in unit tests that don't need them).
+// checks. lister lets nodeExists, the capacity check and pvProtection read the live
+// Applications and Nodes (storage.Storage satisfies it); pass nil to disable those
+// lister-backed checks (e.g. in unit tests that don't need them).
 func DefaultChain(lister Lister) Chain {
 	return Chain{
 		defaulting{},
@@ -45,5 +45,6 @@ func DefaultChain(lister Lister) Chain {
 		nodeRestriction{},
 		nodeExists{lister: lister},
 		capacityCheck{lister: lister},
+		pvProtection{lister: lister},
 	}
 }
