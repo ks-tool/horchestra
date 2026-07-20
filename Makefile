@@ -52,19 +52,21 @@ $(BIN):
 	@mkdir -p $(BIN)
 
 ## test: per-module tests (whole-workspace `go test ./...` spans modules)
-test: test-api test-apiserver test-agent test-root
+test: test-api test-apiserver test-agent test-scheduler test-root
 test-api:
 	cd api && $(GO) test ./...
 test-apiserver:
 	cd apiserver && $(GO) test ./... -race
 test-agent:
 	cd agent && $(GO) test ./...
+test-scheduler:
+	cd scheduler && $(GO) test ./...
 test-root:
 	$(GO) test ./...
 
 ## lint: gofmt check + go vet (per module)
 lint: vet
-	@out="$$(gofmt -l api apiserver agent cmd pkg)"; \
+	@out="$$(gofmt -l api apiserver agent scheduler cmd pkg)"; \
 	if [ -n "$$out" ]; then echo "gofmt needs formatting:"; echo "$$out"; exit 1; fi; \
 	echo "gofmt: clean"
 
@@ -74,10 +76,11 @@ vet:
 	cd api && $(GO) vet ./...
 	cd apiserver && $(GO) vet ./...
 	cd agent && $(GO) vet ./...
+	cd scheduler && $(GO) vet ./...
 
 ## fmt: gofmt -w the live modules
 fmt:
-	gofmt -w api apiserver agent cmd pkg
+	gofmt -w api apiserver agent scheduler cmd pkg
 
 ## proto: regenerate the shared node gRPC stubs into api/pb
 proto:
