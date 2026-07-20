@@ -53,8 +53,10 @@ type ApplicationSpec struct {
 	// Image is a plain OCI image reference, e.g. reg.io/ns/app:v1 (no scheme).
 	Image string `json:"image" jsonschema:"minLength=1"`
 	// NodeName pins the application to a single node: one application runs on
-	// exactly one node. Required and author-supplied on create/update.
-	NodeName string `json:"nodeName" jsonschema:"minLength=1"`
+	// exactly one node. Optional: when empty the scheduler assigns a node by fitting
+	// the app's resource requests; when the author sets it the app is pinned there
+	// and the scheduler leaves it alone.
+	NodeName string `json:"nodeName,omitempty"`
 	// Command overrides the image ENTRYPOINT and Args overrides its CMD (Kubernetes
 	// semantics). Both are literal argv — never interpolated with values.
 	Command []string `json:"command,omitempty"`

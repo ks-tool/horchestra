@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/ks-tool/horchestra/apiserver/service"
 	"github.com/ks-tool/horchestra/pkg/config"
 	"github.com/ks-tool/horchestra/pkg/storage/bolt"
+	"github.com/ks-tool/horchestra/scheduler"
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -103,10 +105,29 @@ func runController(cfg config.Config) error {
 	srv := apiserver.New(sch, svc,
 		apiserver.AuditID,
 		apiserver.Auth(authenticator),
+		apiserver.RequestLog,
 		apiserver.Authz(authorizer),
 	)
 	srv.SetLogStreamer(nodes)
 	srv.EmulatePodsAPI()
+
+	// Automatic placement: assign a node to every Application with no spec.nodeName
+	// by fitting its resource requests. Runs beside the transport, writing back
+	// through the service so admission re-validates each placement.
+	if !cfg.DisableScheduler {
+		schedLog := log.With().Str("component", "scheduler").Logger()
+		sched := scheduler.New(schedClient{svc}, scheduler.Config{
+			Policy:       scheduler.Policy(cfg.SchedulerPolicy),
+			ReadyTimeout: cfg.NodeReadyTimeoutDuration(),
+			Logger:       &schedLog,
+		})
+		go func() {
+			if err := sched.Run(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Msg("scheduler stopped")
+			}
+		}()
+		log.Info().Str("policy", cfg.SchedulerPolicy).Msg("scheduler enabled")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })

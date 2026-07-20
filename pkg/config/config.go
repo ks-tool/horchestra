@@ -28,6 +28,12 @@ type Config struct {
 	// NodeReadyTimeout is a Go duration string (e.g. "45s", "2m"): a node whose
 	// heartbeat is older than this reads as NotReady in `kubectl get nodes`.
 	NodeReadyTimeout string `json:"nodeReadyTimeout"`
+	// DisableScheduler turns off automatic placement: Applications with an empty
+	// spec.nodeName then stay pending until an author sets one.
+	DisableScheduler bool `json:"disableScheduler"`
+	// SchedulerPolicy is how the scheduler picks among the nodes an app fits:
+	// "spread" (balance load, the default) or "binpack" (pack tight).
+	SchedulerPolicy string `json:"schedulerPolicy"`
 
 	// ConfigFile is the path to a YAML config file (--config); it is layered under
 	// the explicitly-set flags by Complete and is itself never read from a file.
@@ -50,6 +56,7 @@ func Default() Config {
 		Authorizer:       "rbac",
 		AdminGroups:      []string{"system:masters"},
 		NodeReadyTimeout: DefaultNodeReadyTimeout.String(),
+		SchedulerPolicy:  "spread",
 	}
 }
 
@@ -66,6 +73,8 @@ func (c *Config) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&c.TLSCA, "tls-ca", c.TLSCA, "CA that verifies client certificates (enables mTLS)")
 	fs.StringVar(&c.AuthConfig, "auth-config", c.AuthConfig, "auth-config (kubeconfig) bundling the serving cert/key, client CA and address (from `node-tool init`)")
 	fs.StringVar(&c.NodeReadyTimeout, "node-ready-timeout", c.NodeReadyTimeout, "how long a node's heartbeat may age before it reads NotReady (e.g. 45s, 2m)")
+	fs.BoolVar(&c.DisableScheduler, "disable-scheduler", c.DisableScheduler, "disable automatic node assignment for Applications with no spec.nodeName")
+	fs.StringVar(&c.SchedulerPolicy, "scheduler-policy", c.SchedulerPolicy, "node selection policy: spread (balance) or binpack (pack)")
 	fs.StringVar(&c.ConfigFile, "config", c.ConfigFile, "path to a YAML config file (overridden by explicit flags)")
 }
 
@@ -101,6 +110,8 @@ func (c *Config) Complete(fs *pflag.FlagSet) error {
 			{"tls-ca", func() { c.TLSCA = file.TLSCA }},
 			{"auth-config", func() { c.AuthConfig = file.AuthConfig }},
 			{"node-ready-timeout", func() { c.NodeReadyTimeout = file.NodeReadyTimeout }},
+			{"disable-scheduler", func() { c.DisableScheduler = file.DisableScheduler }},
+			{"scheduler-policy", func() { c.SchedulerPolicy = file.SchedulerPolicy }},
 		} {
 			if !fs.Changed(m.name) {
 				m.apply()
