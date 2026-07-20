@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bunrouter"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -21,6 +22,35 @@ func AuditID(next bunrouter.HandlerFunc) bunrouter.HandlerFunc {
 		}
 		w.Header().Set("Audit-Id", id)
 		return next(w, req)
+	}
+}
+
+// RequestLog records every mutating request (create/update/patch/delete) with its
+// verb, path, caller identity and audit id — so a write, and especially a DELETE,
+// is always attributable. Reads (GET/watch) are not logged, to keep the audit
+// trail focused and low-noise. Place it after Auth (so the identity is set) and
+// before Authz (so a denied request is logged too).
+func RequestLog(next bunrouter.HandlerFunc) bunrouter.HandlerFunc {
+	return func(w http.ResponseWriter, req bunrouter.Request) error {
+		err := next(w, req)
+		switch req.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			user := "-"
+			if id := authn.FromContext(req.Context()); id != nil {
+				user = id.Name
+			}
+			ev := log.Info().
+				Str("verb", req.Method).
+				Str("path", req.URL.Path).
+				Str("user", user).
+				Str("auditID", w.Header().Get("Audit-Id")).
+				Str("remote", req.RemoteAddr)
+			if err != nil {
+				ev = ev.Err(err)
+			}
+			ev.Msg("api request")
+		}
+		return err
 	}
 }
 
