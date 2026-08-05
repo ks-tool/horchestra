@@ -6,7 +6,7 @@ require (
 	github.com/casbin/casbin/v3 v3.11.0
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/google/uuid v1.6.0
-	github.com/ks-tool/horchestra/api v0.9.0
+	github.com/ks-tool/horchestra/api v0.9.1
 	github.com/rs/zerolog v1.35.1
 	github.com/uptrace/bunrouter v1.0.23
 	google.golang.org/grpc v1.83.0
