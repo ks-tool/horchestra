@@ -18,25 +18,61 @@ const modulePrefix = "github.com/ks-tool/horchestra/"
 // source tree, so a refactor that reaches across a boundary fails a test instead of silently
 // widening the blast radius.
 
-// repoRoot walks up from the test's working directory to the workspace root (the directory
-// holding go.work), so the filesystem-walking arch tests are robust to whatever CWD go test
-// runs them from.
+// repoRoot walks up from the test's working directory to the checkout these filesystem-walking
+// tests need to see whole, whatever CWD `go test` chose.
+//
+// By .git, because "the checkout" is what has one, and every other answer has already been wrong
+// here: go.work stopped being present the day the modules became resolvable from the proxy, and the
+// outermost go.mod is this module itself in a checkout that carries no root module — which made
+// every path double (controller/controller/loops) and every test fail for a reason that had nothing
+// to do with what it checks. A checkout without .git falls back to the outermost go.mod, which is
+// right for a tarball.
+//
+// What is found is then checked for the siblings these tests walk, and the two ways it can lack
+// them are NOT the same: a directory holding this module alone is an extracted copy, where there is
+// no architecture to check and skipping is honest; anything else is a checkout that was found
+// wrongly, and must fail loudly rather than pass over a tree it never read.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	git, mod := "", ""
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
-			return dir
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			git = dir
+		}
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			mod = dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatal("go.work not found walking up from the test working directory")
+			break
 		}
 		dir = parent
 	}
+	root := git
+	if root == "" {
+		root = mod
+	}
+	if root == "" {
+		t.Fatal("no .git or go.mod above the test working directory")
+	}
+	var missing []string
+	for _, d := range []string{"api", "controller"} {
+		if fi, err := os.Stat(filepath.Join(root, d)); err != nil || !fi.IsDir() {
+			missing = append(missing, d)
+		}
+	}
+	if len(missing) > 0 {
+		if git == "" {
+			t.Skipf("%s holds this module alone (no %s): the architecture tests need the whole checkout",
+				root, strings.Join(missing, ", "))
+		}
+		t.Fatalf("%s does not look like the checkout: %s missing", root, strings.Join(missing, ", "))
+	}
+	return root
 }
 
 // goFiles calls fn for every non-test .go file under root, skipping VCS and build dirs.

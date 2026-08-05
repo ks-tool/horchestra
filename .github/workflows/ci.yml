@@ -1,0 +1,100 @@
+# CI for the horchestra workspace: six modules — api, controller, agent, netd, sandbox and the root
+# composition — plus hack/, which stands outside it.
+#
+# Everything runs on ubuntu, and not for convenience: half this tree is behind //go:build linux
+# (systemd, D-Bus, overlayfs, user namespaces, netlink, BPF, seccomp) and carries no portability
+# stub, so a darwin host can only type-check it. On a linux runner those tests RUN — which the make
+# targets now decide by GOHOSTOS rather than by being told.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: CI only reads the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # No silent toolchain download. The Go version comes from the tree (below), and `local` makes a
+  # tree asking for one the runner does not have fail and say so — the previous workflow named
+  # 1.26.4 while every module pinned 1.26.5, and nothing ever reported the difference.
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    name: Lint (gofmt + vet + tidy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # From the root module's `go` directive rather than a literal: a version written here is
+          # a second place to update, and the one that gets forgotten.
+          go-version-file: go.mod
+          # Every module's sums, by glob — a module added later must not be able to miss the cache
+          # key by not being listed.
+          cache-dependency-path: "**/go.sum"
+
+      # Before the workspace exists, because this is the one gate about life without it: each module
+      # must declare and hash the siblings it imports. Under a workspace those requirements are
+      # unnecessary and go stale unnoticed — which is exactly how a checkout of the published
+      # modules came to fail with `missing go.sum entry for .../api`, on a tree whose own CI was
+      # green.
+      - name: Every module resolves on its own
+        run: |
+          for m in . api controller agent netd sandbox hack; do
+            echo "== $m"
+            (cd "$m" && go mod tidy -diff)
+          done
+
+      - name: Redirect the modules at this commit
+        run: go work init . ./api ./controller ./agent ./netd ./sandbox
+
+      # gofmt over the whole tree + go vet per module (the linux-only three cross-vetted).
+      - name: make lint
+        run: make lint
+
+  test:
+    name: Test & build (linux, whole tree)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+
+      # The workspace is CREATED here and not committed. go.work is a developer's redirection of the
+      # modules at their working tree; publishing it would impose that redirection on consumers.
+      # CI needs the same redirection for the opposite reason: without it every module builds
+      # against its sibling's last PUBLISHED tag, so a commit changing api and controller together
+      # would be tested as new-api plus controller-against-old-api — which is not the thing anyone
+      # is about to merge. hack/ stays out of it: its testcontainers dependency belongs to nothing
+      # that ships, and `make test-hack` runs.
+      - name: Redirect the modules at this commit
+        run: go work init . ./api ./controller ./agent ./netd ./sandbox
+
+      # `make test` = api, controller (-race), root + netd, hack, and — because GOHOSTOS is linux
+      # here — agent and sandbox for real rather than type-checked. That last pair is the whole
+      # point of running CI on ubuntu: the workload sandbox and the node agent are the code with
+      # the least margin for a regression and the only code no darwin host can execute.
+      - name: make test
+        run: make test
+
+      # Build what is actually shipped, through the same target a release uses: three binaries, with
+      # GOEXPERIMENT=jsonv2 and CGO_ENABLED=0, linked rather than merely compiled. `go build ./...`
+      # (what stood here before) covered the root module's packages and nothing else.
+      - name: make all
+        run: make all

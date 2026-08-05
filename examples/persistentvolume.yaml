@@ -1,0 +1,42 @@
+# horchestra manifest: a PersistentVolume authored explicitly, instead of letting the
+# scheduler create one implicitly from an Application's pv volume (see postgres.yaml).
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/persistentvolume.yaml
+#
+# Author it yourself when you need to pin the node, keep the data on delete, or let more than
+# one Application mount it. Its lifecycle is independent of any Application: deleting
+# the app leaves the volume and its data alone, and a PersistentVolume an Application still
+# mounts cannot be deleted at all (403, naming the mounting apps) — repoint or delete them first.
+#
+# On the node it is a directory under <state-dir>/volumes, provisioned only by the node in
+# spec.node, and bind-mounted into the app's otherwise read-only rootfs. There is no driver to
+# choose: a directory on that node is the only backend, which is why spec.node is the whole of
+# a volume's placement.
+apiVersion: horchestra.io/v1
+kind: PersistentVolume
+metadata:
+  name: pg-data
+  namespace: default # namespaced: two tenants may both have a "pg-data" without colliding
+spec:
+  size: 20Gi # advisory: the backing store is a host directory, not a quota
+  node: sav-01 # only this node provisions and backs it; the scheduler places mounting apps here
+  # Retain keeps the data when the PersistentVolume is deleted and the agent stops managing it
+  # (an existing directory is re-adopted if the volume comes back). Delete, the default,
+  # reclaims the backing store. The agent records this at provision time, because a deleted
+  # volume's spec is already gone by the time its data would be reclaimed.
+  reclaimPolicy: Retain
+  # Directory mode, octal as a STRING. It is validated and clamped to something the workload
+  # identity can actually use, so a setuid/setgid bit or a world-writable mode on a
+  # root-owned directory is not applied verbatim. Omit it for the 0770 default.
+  mode: "0770"
+  # Let several Applications mount this volume at once (each typically under its own subPath).
+  # WITHOUT it a volume belongs to exactly one Application and a second one naming it is
+  # refused with a 403 — because whether concurrent writers are fine depends on what the data
+  # is, and only whoever authored the volume knows. There is no counterpart on an Application's
+  # inline pv volume, on purpose: a workload cannot open up another workload's storage, and a
+  # volume the scheduler creates from an inline mount is always exclusive.
+  #
+  # It cannot be turned off again while more than one Application still mounts the volume; drop
+  # the extra mounters first. Sharing works because every workload in a namespace holds the same
+  # primary group and the volume is setgid, so what one writes stays reachable by the next.
+  shared: true

@@ -1,0 +1,196 @@
+# horchestra manifest: an ApplicationSet is a BUNDLE — an explicit list of named component
+# Applications the control plane creates, schedules and garbage-collects as one unit. It is
+# NOT Argo: there are no generators and no templating; each component's spec IS an Application
+# spec, written out in full. A component fans out in exactly one typed way — its `scale` trait,
+# either `replicas: N` (N identical children) or `nodeSpread` (one child per matching Node) —
+# where the ONLY variation is the index or the node, never a substituted string.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/applicationset.yaml
+#   kubectl --kubeconfig pki/admin.conf get appset,applications
+#
+# `kubectl get appset` reads like a Deployment: DESIRED / CURRENT / RUNNING and a one-word
+# STATUS — Ready, Progressing, or whatever is holding the set (RolloutHeld, AwaitingAnchor,
+# RenderError). "Running" means the node reports the workload up AND reports converging the
+# generation the object currently carries; an app running an older spec than the one stored
+# reads Updating, not Running, so a change a node could not apply is never mistaken for live.
+#
+# Every child carries the reserved labels horchestra.io/application-set and horchestra.io/component,
+# the horchestra.io/appset-spec-hash annotation and a controller ownerReference to the set. All
+# four are CONTROLLER-OWNED, not yours to write: a client that sets any of them is refused at
+# create and they are carried over verbatim at update, because the ownerReference is a delete
+# authority (the set's GC reaps whatever it points at, in-process, with no RBAC check) and the
+# annotation is the convergence signal. For the same reason the spec of a child a set owns is not
+# client-writable at all (403) — edit the set, not the child. Deleting the set cascade-deletes its
+# children; prune removes any component a reconcile no longer lists.
+#
+# To retire the set and LEAVE the workloads running, say so on the delete —
+# `kubectl delete appset data-tier --cascade=orphan`. The children are stripped of all four marks
+# above and carry on as ordinary Applications. It is one-way: they keep their names, so
+# re-creating this set collides with them rather than re-adopting them.
+apiVersion: horchestra.io/v1
+kind: ApplicationSet
+metadata:
+  name: data-tier
+  namespace: default
+spec:
+  # Common config projected into every child: labels/annotations merged (child wins), env
+  # appended UNDER the child's own env (a child var with the same name wins — plain config only,
+  # no secrets), volumes appended and deduplicated by mountPath.
+  common:
+    labels:
+      stack: demo
+    env:
+      - name: TZ
+        value: UTC
+  # How the set converges a CHANGED spec — one of its two traits. maxUnavailable caps how many
+  # LIVE children may be taken down at once, so a version that never comes back Running stalls
+  # the rollout (status RolloutHeld) instead of reaching every child. A child that is already
+  # down is updated regardless — it costs no availability, and the opposite rule would deadlock
+  # a fully broken set: the budget would be spent and the fix could never land. Creates and
+  # prunes are not updates and are never held.
+  rollout:
+    maxUnavailable: 1
+    prune: true # delete children a reconcile no longer lists (default)
+  applications:
+    # --- 3 × cache: the replicas fan-out ---------------------------------------------------
+    # Children data-tier-cache-0/-1/-2, byte-identical specs, each placed independently.
+    # Setting replicas at all switches the component to indexed names, so adding or removing
+    # the field RENAMES the children (old pruned, new created).
+    - name: cache
+      scale:
+        replicas: 3
+      metadata:
+        labels:
+          role: cache
+      spec:
+        image: docker.io/library/redis:7-alpine
+        securityContext:
+          # The no-root floor also defaults this to 65532 and rejects uid/gid 0. On a cluster
+          # that allocates per-namespace id blocks, omit this and let admission assign one
+          # from the namespace's own block — a hardcoded id outside it is refused.
+          runAsUser: 65532
+          runAsGroup: 65532
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumes:
+          # a cache needs no persistent volume
+          - volume:
+              type: tmpfs
+              size: 64Mi
+            mountPath: /data
+    # --- 2 × database: replicas with per-child storage --------------------------------------
+    # The pv volume has NO name, so it is provisioned per child from the child's name and each
+    # replica gets its own volume (the StatefulSet-like shape). Naming it would make it ONE
+    # volume every replica mounts — which is how workloads deliberately share data (subPath
+    # included), and is allowed: a set's children obey the same rules as the identical
+    # hand-authored Applications they compile to.
+    - name: db
+      scale:
+        replicas: 2
+      metadata:
+        labels:
+          role: database
+      spec:
+        image: docker.io/library/postgres:18-alpine
+        env:
+          - name: POSTGRES_HOST_AUTH_METHOD
+            value: trust # demo auth; mount a Secret in production
+          - name: PGDATA
+            value: /var/lib/postgresql/data
+        ports:
+          - name: postgres
+            port: 5432
+        resources:
+          requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+        volumes:
+          # unnamed → one volume per replica
+          - volume:
+              type: pv
+              size: 10Gi
+            mountPath: /var/lib/postgresql
+          # ephemeral unix-socket dir
+          - volume:
+              type: tmpfs
+              size: 64Mi
+            mountPath: /run/postgresql
+        # No securityContext.runAsUser on purpose: the postgres entrypoint starts as root to
+        # initialise and chown PGDATA before dropping privileges itself. The always-on hardened
+        # floor still applies (NoNewPrivileges, ProtectSystem=strict, read-only overlay rootfs).
+    # --- a nodeSpread component: one child per matching Node (a DaemonSet) -----------------
+    # The other fan-out axis: not an index, a node. spec.placement.nodeName is injected per node — a
+    # nodeSpread component must not set it itself — and a cordoned node is included, matching
+    # how a Kubernetes DaemonSet ignores unschedulable.
+    - name: heartbeat
+      scale:
+        nodeSpread:
+          # An empty selector is every node. To spread onto a subset, name the labels:
+          #   nodeSelector:
+          #     role: edge
+          nodeSelector: {}
+      spec:
+        image: docker.io/library/busybox:latest
+        command:
+          - /bin/sh
+          - "-c"
+          - "while true; do echo heartbeat on $(hostname); sleep 30; done"
+        securityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+        resources:
+          requests:
+            cpu: 20m
+            memory: 16Mi
+---
+# A second set showing the whole-set placement trait: every child on ONE node. The first component by
+# name is the ANCHOR the scheduler places freely; the siblings are not created until it lands
+# and are then created already pinned to its node (status AwaitingAnchor until then).
+# Creating them unpinned would let the scheduler scatter the set, and pinning them afterwards
+# would mean moving running workloads. placement.mode and a nodeSpread component are
+# mutually exclusive — co-locating and spreading contradict each other.
+apiVersion: horchestra.io/v1
+kind: ApplicationSet
+metadata:
+  name: colocated-pair
+  namespace: default
+spec:
+  placement:
+    mode: sameNode
+  applications:
+    - name: api # the anchor (first by name): the scheduler picks its node
+      spec:
+        image: docker.io/library/busybox:latest
+        command:
+          - /bin/sh
+          - "-c"
+          - sleep 3600
+        securityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+        resources:
+          requests:
+            cpu: 20m
+            memory: 16Mi
+    - name: sidecar # created once the anchor is placed, pinned to the same node
+      spec:
+        image: docker.io/library/busybox:latest
+        command:
+          - /bin/sh
+          - "-c"
+          - sleep 3600
+        securityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+        resources:
+          requests:
+            cpu: 20m
+            memory: 16Mi

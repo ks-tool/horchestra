@@ -1,0 +1,64 @@
+# A whole fleet in one file: `node-tool apply -f node-tool.yaml`.
+#
+# Three documents, and the split is the point. The two Config kinds describe the ROLES and are
+# written once; the Inventory says which host holds which, and is the only one that repeats.
+#
+# `node-tool init` must have run first — it creates the CA this file signs against. PKI is a
+# lifecycle rather than a state, which is why it stayed an imperative command.
+
+apiVersion: node-tool.horchestra.io/v1
+kind: ControllerConfig
+spec:
+  # The LOCAL directory holding the CA. Nothing from it is uploaded except what clusterCAKey says.
+  pkiDir: pki
+  # Bound on every interface; the serving certificate advertises the inventory address instead.
+  addr: ":8443"
+  storage: bolt:/var/lib/horchestra/controller.db
+  # One range for the whole fleet — not a slice per node. It reaches a node in the desired-state
+  # push, so the controller is the only place that knows it.
+  routedCIDR: 10.244.0.0/16
+  # Node certificates expire, and how they are renewed has no default — three answers, pick one:
+  #   clusterCAKey  the CA key goes to the host and the controller signs rotation CSRs itself
+  #   vaultPKI      a Vault/OpenBao engine signs, so no signing key is held here (node-tool-vault.yaml)
+  #   offlineCA     nothing signs; certificates expire at their TTL and are reissued by hand
+  clusterCAKey: pki/ca.key
+
+---
+apiVersion: node-tool.horchestra.io/v1
+kind: NodeConfig
+spec:
+  # Left unset: the inventory names the controller, so the URL is read from this file rather than
+  # inferred from whichever local interface happened to route toward a node.
+  # controller: https://10.92.16.121:8443
+  heartbeat: 5s
+  netd:
+    # How another node is REACHED. `none` needs an underlay that carries workload addresses, and a
+    # cloud VPC is not one — measured: it drops them outright, silently.
+    overlay: ipip
+
+---
+apiVersion: node-tool.horchestra.io/v1
+kind: Inventory
+ssh:
+  # The agent is unprivileged and runs on this user's own systemd manager. A root login works and
+  # hands it back the privilege the design gives up.
+  user: ks-tool
+  acceptNew: true
+nodes:
+  - addr: 10.92.16.121
+    role: controller
+    binaries:
+      - ./bin/horchestra-controller
+  - addr: 10.92.16.17
+    role: agent
+    # `netd: true` asks for the privileged network helper on THIS host: an isolated workload needs
+    # it, a host-network fleet does not, and putting a root process on a node should be typed out
+    # per host rather than inherited. One binary carries all three node roles.
+    netd: true
+    binaries:
+      - ./bin/horchestra
+  - addr: 10.92.16.188
+    role: agent
+    netd: true
+    binaries:
+      - ./bin/horchestra

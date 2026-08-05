@@ -1,0 +1,119 @@
+# The edge: whatever terminates external traffic, run as an ordinary Application.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/edge.yaml
+#
+# There is no Ingress kind, no LoadBalancer type and no second control plane. An edge is a
+# workload that reads the service catalog and routes into the fleet, so what the control plane
+# owes it is exactly three things: a catalog to read, a credential to read it with, and host
+# ports to bind. Traefik speaks a Consul catalog natively, nginx and HAProxy through
+# consul-template, Fabio through tags — the image below is illustrative and nothing here is
+# written against any of them.
+apiVersion: horchestra.io/v1
+kind: Namespace
+metadata:
+  name: edge
+---
+# The credential is the workload's OWN identity token, mounted as a file the agent keeps in RAM
+# and rewrites in place as the controller re-mints it. Nothing is shared, nothing is copied into
+# a config file, and the audience below is what keeps it worth one door: this token is a caller
+# at the horchestra API and not a login at Vault, even though the same issuer signs both.
+apiVersion: horchestra.io/v1
+kind: Application
+metadata:
+  name: gateway
+  namespace: edge
+spec:
+  image: docker.io/traefik:v3.3
+  # The host's network, so the ports below are the node's real ports. It is the mode every
+  # workload runs in today; for an edge it is what the role requires — external traffic arrives
+  # on a machine's address, not on a cluster-internal one.
+  hostNetwork: true
+  args:
+    - --providers.consulcatalog=true
+    - --providers.consulcatalog.endpoint.address=127.0.0.1:8443
+    - --providers.consulcatalog.endpoint.scheme=https
+    - --providers.consulcatalog.endpoint.tls.ca=/var/run/horchestra/ca.crt
+    - --providers.consulcatalog.endpoint.tokenFile=/var/run/horchestra/token
+    - --providers.consulcatalog.prefix=/servicediscovery
+    - --entryPoints.web.address=:80
+  ports:
+    - name: web
+      port: 80
+  volumes:
+    # type: token is the workload's projected identity: one file, `token`, holding a JWT minted
+    # for this Application at the named audience. It lives in RAM only and is replaced in place
+    # when it is re-minted, so a workload that re-reads the file always has a live credential and
+    # never restarts for one.
+    - volume:
+        type: token
+        audience: horchestra
+      mountPath: /var/run/horchestra
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+---
+# What that identity may do. The workload authenticates as `system:workload:<namespace>:<name>`,
+# so the grant names one workload and not a group — every workload in the fleet carrying
+# system:workloads would be a much wider rule than "the gateway may read the catalog".
+#
+# Two halves, because the catalog has two: the PATHS are non-resource URLs, and the namespaces
+# they may be asked about are ordinary `list services` grants. A path grant cannot see the `?ns=`
+# query parameter, so without the second half a token meant for one tenant would read every one.
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRole
+metadata:
+  name: catalog-reader
+spec:
+  rules:
+    - nonResourceURLs:
+        - /servicediscovery/v1/catalog/*
+        - /servicediscovery/v1/health/*
+        - /servicediscovery/v1/agent/self
+      verbs:
+        - get
+---
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gateway-reads-the-catalog
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: catalog-reader
+  subjects:
+    - kind: User
+      name: system:workload:edge:gateway
+---
+# The namespaces this edge may route to, one Role per tenant. `list services` is what reading a
+# namespace's catalog is authorized as, so a tenant that has not granted this is not in the
+# answers — the edge cannot discover what it was not shown.
+apiVersion: rbac.horchestra.io/v1
+kind: Role
+metadata:
+  name: catalog-reader
+  namespace: team-a
+spec:
+  rules:
+    - apiGroups:
+        - horchestra.io
+      resources:
+        - services
+      verbs:
+        - list
+---
+apiVersion: rbac.horchestra.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-reads-team-a
+  namespace: team-a
+spec:
+  roleRef:
+    kind: Role
+    name: catalog-reader
+  subjects:
+    - kind: User
+      name: system:workload:edge:gateway

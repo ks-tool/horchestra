@@ -1,0 +1,126 @@
+# horchestra manifests: a tenant namespace with a scoped Role, and a read-only fleet viewer.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/rbac.yaml
+#
+# Identity is the client certificate: CN is the user name, each Organization is a group. Issue
+# one with `node-tool kubeconfig alice --group team-a` and the bindings below apply to it.
+# Authorization is Casbin compiled from these objects and refreshed on a watch. The group
+# system:masters bypasses it entirely,
+# so RBAC only means anything on a controller started WITHOUT that flag.
+apiVersion: horchestra.io/v1
+kind: Namespace
+metadata:
+  name: team-a
+---
+# A Role is namespaced: these rules apply only inside team-a. A namespace that still holds
+# objects cannot be deleted, and a RoleBinding whose namespace is gone grants nothing — so a
+# recycled namespace name never inherits the previous tenant's grants.
+apiVersion: rbac.horchestra.io/v1
+kind: Role
+metadata:
+  name: app-admin
+  namespace: team-a
+spec:
+  rules:
+    - apiGroups:
+        - horchestra.io
+      resources:
+        - applications
+        - applicationsets
+        - secrets
+        - persistentvolumes
+      verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+    # `kubectl logs` goes through the read-only pods alias of Application, which authorizes
+    # itself per namespace against `applications` — the grant above already covers it.
+---
+apiVersion: rbac.horchestra.io/v1
+kind: RoleBinding
+metadata:
+  name: team-a-admins
+  namespace: team-a
+spec:
+  subjects:
+    - kind: User # a certificate CN
+      name: alice
+    - kind: Group # a certificate Organization
+      name: team-a
+  roleRef:
+    kind: Role # a RoleBinding may also reference a ClusterRole, applying it in this namespace only
+    name: app-admin
+---
+# A fleet viewer: cluster-wide read of the NODES only. This deliberately does not confer the
+# namespace inventory — the self-service `get namespaces` listing stays filtered to the
+# namespaces the caller is actually bound into, and the unfiltered namespace watch stays
+# admin-only, because a cluster-scoped read reveals nothing about any tenant. Widening it to a
+# namespaced resource (e.g. applications) is what grants the full inventory, so grant that only
+# when you mean it.
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-viewer
+spec:
+  rules:
+    - apiGroups:
+        - horchestra.io
+      resources:
+        - nodes
+      verbs:
+        - get
+        - list
+        - watch
+---
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet-viewers
+spec:
+  subjects:
+    - kind: Group
+      name: sre
+  roleRef:
+    kind: ClusterRole # only ClusterRole is projected here; any other kind grants nothing
+    name: fleet-viewer
+---
+# A metrics collector. /metrics addresses no object, so it is granted by PATH — nonResourceURLs
+# instead of apiGroups/resources — and the verb is the HTTP method, lowercased, because a path
+# has no operation of its own to name. A rule is one half or the other, never both.
+#
+# The exporter is the whole fleet's shape in one response, which is why it is a grant and not a
+# default: nothing outside the discovery paths (/api, /apis, /version, /openapi/...) is served
+# to a caller no rule names.
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-scraper
+spec:
+  rules:
+    - nonResourceURLs:
+        - /metrics
+      verbs:
+        - get
+---
+# A path is not in any namespace, so only a ClusterRoleBinding confers one. Naming this same
+# ClusterRole from a namespaced RoleBinding would grant its resource rules inside that namespace
+# and none of its paths.
+apiVersion: rbac.horchestra.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-scrapers
+spec:
+  subjects:
+    - kind: User
+      name: prometheus
+  roleRef:
+    kind: ClusterRole
+    name: metrics-scraper
+# Escalation is guarded: a non-admin may only grant permissions it already holds itself,
+# evaluated in the object's OWN namespace, and may not grant a wildcard at all. So alice above
+# can create further Roles in team-a, but none wider than her own. The same bar applies to a
+# path: granting /metrics requires already holding it.

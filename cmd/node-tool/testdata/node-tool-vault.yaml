@@ -1,0 +1,63 @@
+# The same fleet, signed through Vault instead of by a CA key on the controller host.
+#
+# This is the third signing mode and the only one where the controller holds NO signing key: it
+# holds a CREDENTIAL to something that signs on its behalf. `clusterCAKey` cannot appear beside it —
+# a key on the host would make the guarantee false while the file still claimed it.
+#
+# What it costs, said plainly: node renewal now depends on Vault being reachable. Nothing renews
+# while it is not, and certificates expire on their own schedule regardless.
+
+apiVersion: node-tool.horchestra.io/v1
+kind: ControllerConfig
+spec:
+  pkiDir: pki
+  routedCIDR: 10.244.0.0/16
+  # The signer and the decision to use it WITHOUT an operator approving each CSR are separate
+  # choices. Without this gate a rotation CSR waits for a human, which is a legitimate way to run.
+  featureGates: AutoNodeCertRotation=true
+  vaultPKI:
+    server: https://10.92.16.121:8200
+    mount: pki_int
+    # Must pin `organization` to system:nodes rather than allowing sign-verbatim: otherwise the
+    # engine issues whatever group a CSR asks for, and the node authorizer believes it.
+    role: nodes
+    # The controller authenticates to Vault as ITSELF. This is NOT the serving certificate from
+    # controller.conf — Vault refuses that one for lacking ClientAuth (it answers 500 "incompatible
+    # key usage"), so it needs a client certificate issued for the purpose.
+    cert: pki/vault-client.crt
+    key: pki/vault-client.key
+    caBundle: pki/vault-ca.crt
+    authPath: cert
+    authRole: controller
+    # The role the controller renews its OWN credential under. Left empty, that renewal is somebody
+    # else's job — and nothing will notice it expiring until signing stops.
+    selfRole: controller
+    # A THIRD role, for the certificates `node-tool kubeconfig` issues to humans. It has to be its
+    # own: `role` above pins organization to system:nodes and `selfRole` issues no group at all, so
+    # neither can produce the system:masters certificate an operator needs.
+    adminRole: operators
+
+---
+apiVersion: node-tool.horchestra.io/v1
+kind: NodeConfig
+spec:
+  heartbeat: 5s
+  netd:
+    overlay: ipip
+
+---
+apiVersion: node-tool.horchestra.io/v1
+kind: Inventory
+ssh:
+  user: ks-tool
+  acceptNew: true
+nodes:
+  - addr: 10.92.16.121
+    role: controller
+    binaries:
+      - ./bin/horchestra-controller
+  - addr: 10.92.16.17
+    role: agent
+    netd: true
+    binaries:
+      - ./bin/horchestra

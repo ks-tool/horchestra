@@ -1,0 +1,62 @@
+# horchestra manifest: a PostgreSQL 18 instance, auto-scheduled with implicit storage.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/postgres.yaml
+#
+# Storage is declared inline as a volume of type pv: the control plane creates the
+# backing PersistentVolume on demand (named after the Application when the volume has
+# no name) and the scheduler co-locates it on the node it picks for the app. Deleting
+# the Application keeps the data; deleting the PersistentVolume reclaims it. You may
+# still create the PersistentVolume separately (see persistentvolume.yaml, e.g. to pin
+# its node or keep the data on delete) — an existing one is used as-is.
+#
+# Scheduling needs at least one ADMITTED node: a node registers itself cordoned
+# (spec.unschedulable), so on a fresh cluster this stays Pending until an operator runs
+# `kubectl uncordon <node>`. `kubectl get nodes` shows which are cordoned.
+#
+# The password here is a demo. secret.yaml is the same database taking its password from
+# a Secret mounted as a file, which is how a credential is meant to reach a workload.
+apiVersion: horchestra.io/v1
+kind: Application
+metadata:
+  name: postgres-18
+spec:
+  image: docker.io/library/postgres:18-alpine
+  # A digest-pinned reference (postgres@sha256:<digest>) is ENFORCED, not decorative: the
+  # node refuses the image unless the registry resolves the pin to exactly that digest.
+  # placement.nodeName omitted → the scheduler picks a node and co-locates the volume there.
+  lifecycle:
+    restartPolicy: Always # long-running service (this is also the default)
+  # env is an ordered list of plain config only — a credential never goes in env
+  env:
+    - name: POSTGRES_HOST_AUTH_METHOD
+      value: trust # demo auth; in production mount a password file
+    - name: PGDATA
+      value: /var/lib/postgresql/data # data lands inside the mounted volume below
+  ports:
+    # a pure declaration for an external edge/LB — horchestra runs no data-plane
+    - name: postgres
+      port: 5432
+  resources:
+    requests: # reserved on the node
+      cpu: 500m
+      memory: 256Mi
+    limits: # hard caps; requests <= limits (admission-enforced)
+      cpu: "1"
+      memory: 512Mi
+  volumes:
+    - volume:
+        # persistent; the PV is created implicitly if absent
+        name: pg-data
+        type: pv
+        size: 10Gi
+      mountPath: /var/lib/postgresql
+    - volume:
+        # ephemeral unix-socket dir (in-memory, no PV)
+        type: tmpfs
+        size: 64Mi
+      mountPath: /run/postgresql
+  # No securityContext.runAsUser here on purpose: the postgres entrypoint starts as
+  # root to initialise/chown PGDATA and then drops to the postgres user itself.
+  # Forcing a non-root uid would need an fsGroup chown of the volume directory (a
+  # follow-up); meanwhile the always-on hardened floor still applies —
+  # NoNewPrivileges, ProtectSystem=strict and a read-only overlay rootfs.

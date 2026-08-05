@@ -1,0 +1,52 @@
+# horchestra manifest: a run-to-completion job — a workload that is allowed to end.
+#
+#   kubectl --kubeconfig pki/admin.conf apply -f examples/job.yaml
+#   kubectl --kubeconfig pki/admin.conf get app migrate -o yaml
+#
+# There is no Job kind. `lifecycle.restartPolicy: Never` IS the shape: the node renders the unit
+# as a systemd oneshot, whose activation is the whole run, and keeps it in its terminal state
+# instead of starting it again. status then carries what a job is actually looked at for —
+# phase Succeeded or Failed, the exitCode, finishedAt, and attempts.
+#
+# A finished job is withheld from its node, which is what makes it run once rather than once per
+# boot: its unit is transient and dies with the node's systemd manager, so the record that it
+# already ran has to be the object. Editing the spec is what runs it again — a new generation
+# makes the stored outcome stale, and the node is told about the workload once more.
+apiVersion: horchestra.io/v1
+kind: Application
+metadata:
+  name: migrate
+  namespace: default
+spec:
+  image: docker.io/library/postgres:18-alpine
+  command:
+    - /bin/sh
+    - "-c"
+    - "psql -h db.internal -U postgres -f /migrations/up.sql"
+  lifecycle:
+    restartPolicy: Never
+    # The whole run is bounded: from the moment the node starts the workload to the moment its
+    # process leaves. Past it the workload is killed and reported Failed with DeadlineExceeded —
+    # which a bare exit code could never tell you, since a killed job and a crashed one both
+    # leave a non-zero status behind. Omit it and the job may run as long as it likes; it is NOT
+    # left to systemd's default start timeout, which would kill a long migration at 90 seconds.
+    activeDeadlineSeconds: 900
+    # Retries, not runs: 2 means up to three runs in total. Each failure is paced by the node's
+    # own restart backoff, and the count is status.attempts — kept on the OBJECT, because the
+    # unit that holds it dies with the node's manager and a reboot would otherwise refund the
+    # whole budget. When it is spent the job is Failed for good, with BackoffLimitExceeded.
+    #
+    # Both fields are refused on a service (422): neither has a meaning for a workload that is
+    # never supposed to end, and storing a field the node ignores is worse than not having it.
+    backoffLimit: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+  volumes:
+    - volume:
+        type: pv
+        name: migrations
+        size: 1Gi
+      mountPath: /migrations
+      readOnly: true

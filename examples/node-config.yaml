@@ -1,0 +1,34 @@
+# horchestra node-agent config: node-local operator policy, NOT an API object.
+#
+#   horchestra agent --auth-config /etc/horchestra/node.conf --config /etc/horchestra/node.yaml
+#   node-tool install agent --auth-config /etc/horchestra/node.conf --config /etc/horchestra/node.yaml
+#
+# By default a node offers ALL of its resources and accepts any image a tenant names; this file
+# is where an operator caps both. Every field is optional and a zero field takes the documented
+# default, so the empty file behaves exactly like no file at all.
+
+# Capacity the node advertises to the scheduler. It can only ever REDUCE what the machine has —
+# a value above the real capacity is ignored — so dedicating part of a host to the orchestrator
+# is a matter of naming the part. The controller also clamps an absurd self-report to a sanity
+# ceiling, since the scheduler and the admission capacity check both believe this number.
+resources:
+  cpu: "4" # cores; Kubernetes quantity syntax
+  memory: 8Gi
+
+# Bounds on what the shared image store accepts from a registry. These are enforced
+# fail-closed BEFORE any blob lands (against the digest-verified manifest) and again per blob
+# during the transfer, so a registry cannot declare kilobytes and then stream terabytes. A pull
+# that is refused surfaces as the workload's converge error.
+images:
+  maxLayers: 128 # layers one image may declare (default 128)
+  maxImageSize: 8Gi # total declared blob bytes: config + compressed layers (default 8Gi)
+  maxLayerSize: 16Gi # DECOMPRESSED size of a single layer, capped before extraction so a
+  # decompression bomb never reaches the filesystem (default 16Gi)
+  storeBudget: 100Gi # total on-disk footprint of the image store; a pull whose declared size
+  # would exceed it is refused. UNSET means no budget — the store then
+  # grows until the free-space precondition (always applied) stops it.
+  #
+  # Reclamation is manual by design: `horchestra agent purge [--exclude <ref>]`
+  # in a maintenance window, never on the reconcile path, so freeing blobs
+  # cannot race a live workload's converge. A failed pull still cleans up
+  # the blobs it landed on its own.

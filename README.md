@@ -1,6 +1,6 @@
 # horchestra
 
-> **⚠️ Early development.** Not production-ready. APIs, configuration formats and behaviour change without
+> **⚠️ Alpha version.** Not production-ready. APIs, configuration formats and behaviour change without
 > notice.
 
 **A control plane for running containerised applications on a fleet of ordinary Linux hosts — without running
