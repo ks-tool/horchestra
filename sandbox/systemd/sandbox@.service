@@ -1,0 +1,85 @@
+# Rootless sandbox unit template. One instance per workload:
+#
+#   install -Dm644 sandbox@.service ~/.config/systemd/user/sandbox@.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sandbox@myapp
+#
+# The instance name %i selects the config, %E the configuration root: ~/.config for a --user
+# unit, /etc for a system one. Layer directories referenced there are prepared beforehand with
+# `oci-packer copy --unpack`.
+#
+# Requires a lingering user session (`loginctl enable-linger $USER`) for the workload to survive
+# logout and come back after a reboot.
+
+[Unit]
+Description=sandbox: %i
+Documentation=https://github.com/ks-tool/sandbox
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/sandbox --config %E/sandbox/%i.json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+
+# Load-bearing, not a style choice: the stop signal must reach the sandbox's FIRST stage, which
+# translates it into the workload's StopSignal (postgres wants SIGINT, its fast shutdown).
+# control-group would deliver the untranslated signal to the workload as well, and which of the
+# two it acts on then depends on their numbers and its own handlers.
+#
+# A stop that always takes TimeoutStopSec and ends in SIGKILL means the workload has no handler
+# for the signal it is being sent: it is PID 1 of its own namespace, where the kernel discards
+# any signal whose action would be the default. Set StopSignal in the config to one it handles.
+KillMode=mixed
+
+# The sandbox drops these itself before the workload starts; setting them on the unit as well
+# means a misconfigured or replaced binary cannot hand out more than the unit allows. They do
+# not interfere with the sandbox's own machinery: NoNewPrivileges leaves the ambient capability
+# set stage two carries its mount privileges in untouched.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# Exactly the namespaces the sandbox clones, and nothing else. Narrowing this breaks the rootfs
+# assembly — drop `net` and a config with "Network": "none" fails at
+# `fork/exec /proc/self/exe: operation not permitted`, because this directive is itself a seccomp
+# filter on clone. Listing `net` costs the workload nothing either way: the sandbox's own filter
+# denies it every CLONE_NEW* long before it runs.
+RestrictNamespaces=user mnt pid uts ipc net
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Do NOT add systemd's mount-based sandboxing here — ProtectSystem=, ProtectHome=, PrivateTmp=,
+# ReadOnlyPaths=. They are applied before the sandbox clones its own mount namespace, and a
+# read-only / stops it from creating the Merged and InitDir directories it assembles the rootfs
+# in. The read-only root the workload actually gets is the sandbox's own, and it is stricter.
+
+# Resource ceilings. TasksMax bounds the fork bomb; set the rest per workload in a drop-in
+# (systemctl --user edit sandbox@myapp) rather than here. They reach the workload with no help
+# from the sandbox: its processes are the unit's processes, so they are already in its cgroup.
+#
+# MemoryMax alone is not a memory ceiling on a host with swap — the workload is throttled into
+# swapping instead of being killed (measured: a 300 MiB allocation under MemoryMax=48M peaked at
+# 48M of RAM and 258M of swap, and finished). Pair it with MemorySwapMax=0 for a hard bound.
+#
+# For a --user unit these need the controller delegated to the user manager. Defaults differ by
+# version — systemd 258 delegates cpu, memory and pids; older ones only memory and pids — and
+# io/cpuset always need a system-wide drop-in:
+#
+#   # /etc/systemd/system/user@.service.d/delegate.conf   (root; cpuset needs systemd >= 244)
+#   [Service]
+#   Delegate=cpu cpuset io memory pids
+#
+# Check what is actually delegated with
+# `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`;
+# a limit whose controller is missing is accepted by systemd and then does nothing.
+TasksMax=512
+#MemoryMax=512M
+#MemorySwapMax=0
+#CPUQuota=100%
+
+# Keep the journal attributable to the instance.
+SyslogIdentifier=sandbox-%i
+
+[Install]
+WantedBy=default.target
