@@ -20,3 +20,14 @@ protoc -I proto \
 	--go_out="$pkg" --go_opt=paths=source_relative \
 	--go-grpc_out="$pkg" --go-grpc_opt=paths=source_relative \
 	node.proto
+
+# The netd helper's seam, generated the same way into api/netd. A SEPARATE proto file and a
+# separate package on purpose: the one-copy rule exists because two packages generating
+# node.proto would register the same names twice in protobuf's global registry, and that is a
+# property of the FILE, not of gRPC — netd.proto registers its own names once.
+pkg=api/netd
+mkdir -p "$pkg"
+protoc -I proto \
+	--go_out="$pkg" --go_opt=paths=source_relative \
+	--go-grpc_out="$pkg" --go-grpc_opt=paths=source_relative \
+	netd.proto

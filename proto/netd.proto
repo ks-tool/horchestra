@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+// NetdService is the split-privilege seam: the unprivileged agent asks, the privileged
+// helper (horchestra-netd) acts. It exists because the agent CANNOT act — creating a veth
+// into the host's namespace needs CAP_NET_ADMIN there, and bpf() is gated on capabilities
+// in the INITIAL user namespace (with kernel.unprivileged_bpf_disabled=2 even a map update
+// needs CAP_BPF), and no user namespace grants either.
+//
+// THE INVARIANT: every method is closed and typed, carrying DATA. There is no ApplyNetlink,
+// no Exec, and — the one that looks typed but is not — no LoadProgram. A BPF program is
+// arbitrary kernel code; accepting one from the agent would hand root back through a
+// typed-looking door. The helper loads what is embedded in its own binary; the agent says
+// only WHAT it wants.
+//
+// The service is defined here rather than hand-rolled over a socket because the framing,
+// deadlines, error transport, versioning and closed method set are exactly what an IDL
+// gives — and a hand-written protocol re-earns each of them one bug at a time. What gRPC
+// does NOT give is authentication: a unix peer is identified by SO_PEERCRED, which the
+// helper checks in its transport credentials either way.
+package horchestra.netd.v1;
+
+option go_package = "github.com/ks-tool/horchestra/api/netd;netd";
+
+service NetdService {
+  // Status is what this node can actually do, asked before anything is promised: an agent
+  // that learns the workload network is unavailable keeps its workloads on the host network and
+  // says so, instead of starting one isolated from everything including its control plane.
+  rpc Status(StatusRequest) returns (StatusResponse);
+  // SetupWorkloadNetwork wires the namespace a WORKLOAD already lives in: a veth pair with one end in it,
+  // an address, and routes on both sides.
+  //
+  // Nobody hands a namespace to the workload, because the kernel does not allow it. setns into a
+  // network namespace requires CAP_SYS_ADMIN in BOTH the user namespace that owns it and the
+  // caller's CURRENT one — measured, not inferred: an unprivileged process cannot enter a
+  // root-created namespace (EPERM) and cannot enter one owned by its own user's namespace either
+  // (EPERM again). The one arrangement that works is the one where nothing has to enter: the
+  // sandbox creates the network namespace inside the user namespace it has just unshared, so it
+  // is already in it, and this helper — root, with CAP_SYS_ADMIN in an ancestor — reaches in to
+  // wire it.
+  //
+  // Which is why the request names a PID and not a path. There is no pinned handle to keep, no
+  // bind mount to place, and nothing to garbage-collect: the namespace lives exactly as long as
+  // the workload in it.
+  //
+  // Idempotent: the host-side interface existing IS the record, so a repeat call re-applies the
+  // addressing and returns — which matters because the agent converges the same workload on
+  // every push.
+  rpc SetupWorkloadNetwork(SetupWorkloadNetworkRequest) returns (SetupWorkloadNetworkResponse);
+  // TeardownWorkloadNetwork removes this helper's half: the veth pair. The namespace itself is the
+  // agent's to reclaim, because it is the agent's to create.
+  rpc TeardownWorkloadNetwork(TeardownWorkloadNetworkRequest) returns (TeardownWorkloadNetworkResponse);
+  // ProgramRoutes replaces the node's whole view of where workload addresses live. A REPLACE and
+  // never a delta: a delta needs both sides to agree about what was applied before, which is
+  // the second record this design refuses to keep.
+  rpc ProgramRoutes(ProgramRoutesRequest) returns (ProgramRoutesResponse);
+  // ProgramServices replaces the datapath's (clusterIP, port) -> backends map, wholesale and
+  // for the same reason.
+  rpc ProgramServices(ProgramServicesRequest) returns (ProgramServicesResponse);
+  // GC reclaims every network the agent no longer names. The keep list is the whole
+  // authority — the helper holds no opinion about what should exist, which is what stops it
+  // from disagreeing with the control plane that does.
+  rpc GC(GCRequest) returns (GCResponse);
+}
+
+// Workload identifies one workload's network. id is the Application's UID — the node's key for a
+// workload everywhere else — so a delete-and-recreate under one name is two networks.
+message Workload {
+  string id = 1;
+  string namespace = 2;
+  string name = 3;
+  // address is the leased workload address in CIDR form (10.244.1.7/24), so the subnet needs no second
+  // field that could disagree with it.
+  string address = 4;
+  // gateway is the node-side address the namespace routes through.
+  string gateway = 5;
+  // mtu leaves the kernel default at 0. An overlay costs ~50 bytes, and a workload that
+  // learns that from a hanging TLS handshake learns it far too late.
+  int32 mtu = 6;
+}
+
+// Route is where one node's workload addresses live: on this node (node_ip empty) or behind another's.
+message Route {
+  string cidr = 1;
+  string node_ip = 2;
+}
+
+// ServiceRule is one service the datapath answers for.
+message ServiceRule {
+  string cluster_ip = 1;
+  int32 port = 2;
+  string protocol = 3;
+  repeated Backend backends = 4;
+}
+
+message Backend {
+  string address = 1;
+  int32 port = 2;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  // version is the helper's build, for an operator staring at a mismatch.
+  string version = 1;
+  // routed_network reports whether a namespace can be given an address and a route here —
+  // the capability behind the sandbox's "routed" mode, and named after it because while there is
+  // one mode they are one fact.
+  bool routed_network = 2;
+  // datapath reports whether the eBPF programs are loaded and attached. Separate from
+  // routed_network because a host may have namespaces and no BTF.
+  bool datapath = 3;
+  // reason explains a false above, in the words an operator needs to fix it.
+  string reason = 4;
+}
+
+message SetupWorkloadNetworkRequest {
+  Workload workload = 1;
+  // netns_pid is a process living in the namespace to wire — the sandbox, waiting to exec the
+  // workload. The helper reads /proc/<pid>/ns/net and checks that the process belongs to the
+  // CALLER'S OWN uid, which it learns from the kernel (SO_PEERCRED) and not from this message:
+  // an agent may wire the namespaces of its own workloads and of nothing else on the host.
+  int32 netns_pid = 2;
+}
+
+message SetupWorkloadNetworkResponse {
+  // host_interface is the node-side end of the pair, so an operator reading a node can find the
+  // workload's link without recomputing a digest.
+  string host_interface = 1;
+  string address = 2;
+}
+
+message TeardownWorkloadNetworkRequest {
+  string id = 1;
+}
+
+message TeardownWorkloadNetworkResponse {}
+
+message ProgramRoutesRequest {
+  repeated Route routes = 1;
+}
+
+message ProgramRoutesResponse {}
+
+message ProgramServicesRequest {
+  repeated ServiceRule services = 1;
+}
+
+message ProgramServicesResponse {}
+
+message GCRequest {
+  // keep is every workload id the agent still wants. An empty list is meaningful — the node
+  // runs nothing — and is what makes GC total rather than a delta. What is reclaimed is this
+  // helper's own state: the host-side interfaces of workloads no longer named. The namespaces
+  // are the agent's and it reclaims them itself.
+  repeated string keep = 1;
+}
+
+message GCResponse {}

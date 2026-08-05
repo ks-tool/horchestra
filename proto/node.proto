@@ -2,6 +2,14 @@ syntax = "proto3";
 
 package horchestra.node.v1;
 
+// The datapath's own vocabulary, reused rather than restated. A Route and a ServiceRule are the
+// same fact on both hops — the control plane tells the node where addresses live and what a
+// ClusterIP balances onto, and the node hands exactly that to the helper without reading it. A
+// parallel definition here would be a second shape to keep in step and a translation that can
+// silently drop a field, which is the failure mode nobody notices: a rule that arrives with one
+// backend missing looks like a rule.
+import "netd.proto";
+
 // One shared generated package imported by both the agent (client) and the
 // apiserver (server), so the `horchestra` monolith registers node.proto once.
 option go_package = "github.com/ks-tool/horchestra/api/node;node";
@@ -146,6 +154,17 @@ message DesiredState {
   // result in the Application's status, which is what makes the choice durable — the control
   // plane reads its own past decisions back off what the nodes observed.
   repeated WorkloadNetwork workload_networks = 6;
+  // Where every workload address in the FLEET lives, and what every ClusterIP balances onto. Both
+  // are the node's whole view, replaced on each push and never a delta.
+  //
+  // This is where the least-exposure rule that scopes applications, volumes and secrets to one node
+  // necessarily stops, and it stops for a reason and not by oversight: a datapath that answers a
+  // ClusterIP has to know its backends, and one that forwards a flat address range has to know
+  // where each address is. Scoping either to "what this node runs" would leave a node unable to
+  // reach half the cluster — the packets come from any process on the host, not only from the
+  // workloads the node was told about.
+  repeated horchestra.netd.v1.Route routes = 7;
+  repeated horchestra.netd.v1.ServiceRule services = 8;
 }
 
 // WorkloadNetwork is one workload's routed address and the gateway it routes through.
