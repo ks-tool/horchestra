@@ -2,5 +2,4 @@
 /pki
 bin
 
-go.work
-go.work.sum
+go.work*

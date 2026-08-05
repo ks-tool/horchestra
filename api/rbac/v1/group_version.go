@@ -20,7 +20,7 @@ func AddToScheme(s *scheme.Scheme) {
 	s.AddResource(
 		GroupVersion.WithKind("Role"),
 		func() types.Object { return new(Role) },
-		scheme.Resource{Plural: "roles"},
+		scheme.Resource{Plural: "roles", Namespaced: true},
 	)
 	s.AddKnownTypes(
 		GroupVersion.WithKind("RoleList"),
@@ -30,10 +30,30 @@ func AddToScheme(s *scheme.Scheme) {
 	s.AddResource(
 		GroupVersion.WithKind("RoleBinding"),
 		func() types.Object { return new(RoleBinding) },
-		scheme.Resource{Plural: "rolebindings"},
+		scheme.Resource{Plural: "rolebindings", Namespaced: true},
 	)
 	s.AddKnownTypes(
 		GroupVersion.WithKind("RoleBindingList"),
 		func() types.Object { return new(RoleBindingList) },
+	)
+
+	s.AddResource(
+		GroupVersion.WithKind("ClusterRole"),
+		func() types.Object { return new(ClusterRole) },
+		scheme.Resource{Plural: "clusterroles", ShortNames: []string{"cr"}},
+	)
+	s.AddKnownTypes(
+		GroupVersion.WithKind("ClusterRoleList"),
+		func() types.Object { return new(ClusterRoleList) },
+	)
+
+	s.AddResource(
+		GroupVersion.WithKind("ClusterRoleBinding"),
+		func() types.Object { return new(ClusterRoleBinding) },
+		scheme.Resource{Plural: "clusterrolebindings", ShortNames: []string{"crb"}},
+	)
+	s.AddKnownTypes(
+		GroupVersion.WithKind("ClusterRoleBindingList"),
+		func() types.Object { return new(ClusterRoleBindingList) },
 	)
 }

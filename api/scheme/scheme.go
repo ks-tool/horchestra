@@ -3,11 +3,13 @@ package scheme
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
 	"github.com/ks-tool/horchestra/api/types"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -22,25 +24,50 @@ type Resource struct {
 	Plural     string
 	Singular   string
 	ShortNames []string
+	Namespaced bool
+	// NoHistory forbids storage from retaining superseded revisions of this Kind. It is set on
+	// Kinds whose old revisions are themselves the hazard — a Secret, whose pre-rotation
+	// plaintext would otherwise sit in the copy-on-write history of any backup taken after the
+	// operator believes the credential is dead. Rollback is not available for such a Kind.
+	NoHistory bool
 }
 
 type Scheme struct {
 	m    map[schema.GroupVersionKind]ObjectFunc
 	res  map[schema.GroupVersionKind]Resource
-	defs map[schema.GroupVersionKind]func(any)
+	kind map[schema.GroupVersionKind]*kindSchema
+	// defs are the custom defaulters registered per Kind (RegisterDefaults), run before that
+	// Kind's declared defaults.
+	defs map[schema.GroupVersionKind][]DefaultFunc
+}
+
+// kindSchema is everything derived from a Kind's Go type when it is registered: the compiled
+// validator every write is checked against, the defaults an absent field is filled with, and
+// the schema document itself — which the server publishes, so a client validates a manifest
+// against the very rules the server will apply to it.
+type kindSchema struct {
+	validate *jsonschema.Schema
+	defaults *defaultNode
+	doc      map[string]any
 }
 
 func New() *Scheme {
 	return &Scheme{
 		m:    make(map[schema.GroupVersionKind]ObjectFunc),
 		res:  make(map[schema.GroupVersionKind]Resource),
-		defs: make(map[schema.GroupVersionKind]func(any)),
+		kind: make(map[schema.GroupVersionKind]*kindSchema),
+		defs: make(map[schema.GroupVersionKind][]DefaultFunc),
 	}
 }
 
 // AddResource registers gvk's constructor (like AddKnownTypes) and its addressing
 // metadata, marking it an addressable resource for discovery and error mapping.
 // Plural is required; Singular defaults to the lowercased kind.
+//
+// It also compiles the Kind's input schema from its Go type. That happens here, at
+// registration, rather than on first use: a type the reflector cannot render is a defect in the
+// type, and it should stop the process at startup instead of turning every write of that Kind
+// into a 500.
 func (s *Scheme) AddResource(gvk schema.GroupVersionKind, o ObjectFunc, r Resource) {
 	s.AddKnownTypes(gvk, o)
 	if _, ok := s.m[gvk]; !ok {
@@ -53,6 +80,12 @@ func (s *Scheme) AddResource(gvk schema.GroupVersionKind, o ObjectFunc, r Resour
 		r.Singular = strings.ToLower(gvk.Kind)
 	}
 	s.res[gvk] = r
+
+	k, err := inputSchema(gvk, o())
+	if err != nil {
+		panic(fmt.Sprintf("compile input schema for %s: %v", gvk, err))
+	}
+	s.kind[gvk] = k
 }
 
 // Resource returns the addressing metadata registered for gvk via AddResource.
@@ -64,9 +97,7 @@ func (s *Scheme) Resource(gvk schema.GroupVersionKind) (Resource, bool) {
 // Resources returns a copy of the addressable-resource registry.
 func (s *Scheme) Resources() map[schema.GroupVersionKind]Resource {
 	out := make(map[schema.GroupVersionKind]Resource, len(s.res))
-	for gvk, r := range s.res {
-		out[gvk] = r
-	}
+	maps.Copy(out, s.res)
 	return out
 }
 
@@ -91,7 +122,7 @@ func (s *Scheme) AddKnownTypes(gvk schema.GroupVersionKind, o ObjectFunc) {
 		return
 	}
 
-	if v := reflect.ValueOf(obj); v.Kind() != reflect.Ptr {
+	if v := reflect.ValueOf(obj); v.Kind() != reflect.Pointer {
 		panic(fmt.Sprintf("object must be a pointer: %s", v.Kind()))
 	}
 
@@ -100,15 +131,6 @@ func (s *Scheme) AddKnownTypes(gvk schema.GroupVersionKind, o ObjectFunc) {
 	}
 
 	s.m[gvk] = o
-}
-
-func (s *Scheme) RegisterDefaults(o types.Object, fn func(any)) {
-	gvk := o.GetObjectKind().GroupVersionKind()
-	if _, ok := s.m[gvk]; ok {
-		panic(fmt.Sprintf("duplicate defaulter object kind: %s", gvk))
-	}
-
-	s.defs[gvk] = fn
 }
 
 func (s *Scheme) New(gvk schema.GroupVersionKind) (types.Object, error) {

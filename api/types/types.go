@@ -17,9 +17,13 @@ type Object interface {
 type ObjectMeta struct {
 	ApiVersion string
 	Kind       string
+	Namespace  string
 	Name       string
 }
 
 func (meta ObjectMeta) String() string {
+	if meta.Namespace != "" {
+		return fmt.Sprintf("%s, kind=%s %s/%s", meta.ApiVersion, meta.Kind, meta.Namespace, meta.Name)
+	}
 	return fmt.Sprintf("%s, kind=%s %s", meta.ApiVersion, meta.Kind, meta.Name)
 }

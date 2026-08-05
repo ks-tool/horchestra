@@ -4,7 +4,7 @@ package horchestra.node.v1;
 
 // One shared generated package imported by both the agent (client) and the
 // apiserver (server), so the `horchestra` monolith registers node.proto once.
-option go_package = "github.com/ks-tool/horchestra/api/pb;pb";
+option go_package = "github.com/ks-tool/horchestra/api/node;node";
 
 // NodeService is the controller <-> node-agent transport: each node-agent opens
 // one bidirectional stream (mTLS; the peer certificate CN is the node name). The
@@ -18,7 +18,87 @@ message NodeMessage {
   oneof body {
     NodeStatus status = 1;
     LogChunk log_chunk = 2;
+    AppStatus app_status = 3;
+    AppMetrics app_metrics = 4;
+    NodeUsage node_usage = 5;
   }
+}
+
+// NodeUsage is what the MACHINE is consuming, as distinct from the sum of its workloads —
+// which would miss the system, the agent itself and everything else on the host, and so would
+// be the wrong number to compare a capacity against.
+//
+// Read from /proc, not from cgroup arithmetic: the whole node is what `kubectl top node`
+// means, and /proc/stat and /proc/meminfo are the kernel's own answer to it and readable by
+// anyone. Like AppMetrics it is held in memory and never stored.
+message NodeUsage {
+  // Cumulative busy CPU time across all cores, so the reader derives a rate over the window
+  // it wants — the same rule the per-workload counters follow.
+  int64 cpu_usec = 1;
+  int64 memory_used_bytes = 2;
+  int64 memory_total_bytes = 3;
+  int64 timestamp_unix_nano = 4;
+}
+
+// AppMetrics is what one workload actually consumed, read from its cgroup by the node and
+// reported on the heartbeat.
+//
+// It is NOT part of AppStatus, deliberately. Status is the state of an object and is stored;
+// these are a sample of a moving quantity, and writing them into storage every heartbeat
+// would churn an object's resourceVersion forever, wake every watcher of the Kind, and still
+// leave no history worth having. They are held in the controller's memory, exactly as
+// metrics-server does, and are gone when it restarts.
+message AppMetrics {
+  string namespace = 1;
+  string name = 2;
+  // Cumulative since the workload started. A rate is the reader's job — sending one would
+  // bake this node's sampling interval into the number.
+  int64 cpu_usec = 3;
+  // How long the cgroup was throttled by its CPU quota: the number that says a limit is
+  // biting, which usage alone never shows.
+  int64 cpu_throttled_usec = 4;
+  int64 memory_bytes = 5;
+  // The high-water mark since start — what a request should have been, which current usage
+  // cannot tell you.
+  int64 memory_peak_bytes = 6;
+  int64 pids = 7;
+  // The kernel's own count. A workload that was OOM-killed and restarted looks healthy
+  // afterwards; this is the only thing that remembers.
+  int64 oom_kills = 8;
+  int64 timestamp_unix_nano = 9;
+}
+
+// AppStatus is the node-observed runtime status of one Application pinned to this
+// node — its phase (Running/Failed/Pending) and an optional message. The controller
+// persists it to the Application's status subresource, confined to apps on this node.
+// It carries only what the node OBSERVED: the supervisor unit's name is derived from
+// the workload's uid by whichever runtime supervises it, so reporting it would put a
+// node-side naming rule on the wire and into the API for no reader.
+message AppStatus {
+  string namespace = 1;
+  string name = 2;
+  string phase = 3;
+  string message = 4;
+  // The metadata.generation of the Application this node actually converged to. It NAMES
+  // the version the node is running, which phase alone cannot: a node that fails to apply
+  // a new spec keeps the previous workload running and would otherwise look healthy on the
+  // new one. A rollout gates on it.
+  int64 observed_generation = 6;
+  // How a finished workload finished. A phase alone says a job ended; these say whether it
+  // ended the way it was meant to and when, which is the whole reason to look at a job after
+  // it stops. Both are zero while the workload is still running.
+  int32 exit_code = 7;
+  int64 finished_at_unix_nano = 8;
+  // The routed address this node WIRED the workload at, empty on the host network. It travels
+  // up because the node is what observed it — the same arrangement Kubernetes has for podIP —
+  // and because the control plane reads its own past choices back off these reports: the choice
+  // rides down in the push and is durable only once a node says it is so.
+  string address = 10;
+  // How many times this node has run the job, spent against spec.lifecycle.backoffLimit. It
+  // travels up because the count has to outlive the unit that holds it: a transient unit dies
+  // with the node's manager, so a node-local counter would hand every job a fresh budget after
+  // a reboot. Zero for a service, whose restarts are systemd's and are not budgeted.
+  int32 attempts = 9;
 }
 
 // NodeStatus carries the full Node object (metadata + status) as JSON, reusing
@@ -46,11 +126,47 @@ message ControllerMessage {
 }
 
 // DesiredState is the set the node must reconcile: every Application and
-// PersistentVolume, each a JSON api/v1 object (the node filters to itself, the
-// way it did when it listed them over REST).
+// PersistentVolume, plus the Secrets its pinned apps reference and the
+// SecretStores those secrets name (connection info only — a vault secret's
+// value never transits this stream), each a JSON api object (the node filters
+// to itself, the way it did when it listed them over REST).
 message DesiredState {
   repeated bytes applications = 1;
   repeated bytes persistent_volumes = 2;
+  repeated bytes secrets = 3;
+  repeated bytes secret_stores = 4;
+  // Short-lived controller-minted workload-identity JWTs, one per pinned app that
+  // references a jwt-method SecretStore: the node exchanges the token at Vault's jwt
+  // auth method for exactly that workload's read. The controller is the credential
+  // issuer here, never a value carrier.
+  repeated WorkloadToken workload_tokens = 5;
+  // The routed address each isolated workload is to be wired at. Delivered rather than stored on
+  // the Application for the reason a token is: it is a per-workload decision of the control
+  // plane, and a workload's object is its author's manifest. The node wires it and reports the
+  // result in the Application's status, which is what makes the choice durable — the control
+  // plane reads its own past decisions back off what the nodes observed.
+  repeated WorkloadNetwork workload_networks = 6;
+}
+
+// WorkloadNetwork is one workload's routed address and the gateway it routes through.
+message WorkloadNetwork {
+  // workload is the object UID, the node's key for a workload everywhere else.
+  string workload = 1;
+  // address is in CIDR form (10.244.1.7/32): each workload is its own point-to-point link, so
+  // there is no subnet on the wire for a broader prefix to describe.
+  string address = 2;
+  string gateway = 3;
+  int32 mtu = 4;
+}
+
+// WorkloadToken pairs a workload with one of its identity JWTs. There is one per
+// (workload, audience): a token minted for Vault is a login at Vault and nothing at
+// the control plane, and the one a workload reads the catalog with is the reverse —
+// which is what keeps a single stolen credential worth one door.
+message WorkloadToken {
+  string workload = 1;
+  string token = 2;
+  string audience = 3;
 }
 
 // LogRequest asks the node to stream one application's unit logs back up as
@@ -60,6 +176,15 @@ message LogRequest {
   string app = 2;
   bool follow = 3;
   int64 tail_lines = 4;
+  // NodeUnit asks for the AGENT'S OWN unit journal instead of a workload's. It is a separate
+  // field rather than a reserved value in `app` on purpose: a sentinel in the field that
+  // otherwise names a workload reads as a bug six months later, and the one thing this must
+  // never do is resolve to a workload by accident.
+  //
+  // It is the agent's unit and not the host journal. The host journal carries the output of
+  // every workload on the node, so serving it here would hand over in one call what
+  // pods/log serves one workload at a time with a permission check on each.
+  bool node_unit = 5;
 }
 
 // LogCancel stops an in-progress LogRequest (e.g. the client disconnected).
