@@ -3,7 +3,7 @@ module github.com/ks-tool/horchestra/agent
 go 1.26.5
 
 require (
-	github.com/ks-tool/horchestra/api v0.9.0
+	github.com/ks-tool/horchestra/api v0.9.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/sys v0.47.0

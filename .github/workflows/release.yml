@@ -1,0 +1,105 @@
+# Release: build the deployable binaries from a tag and attach them to its GitHub release.
+#
+# Triggered by the ROOT module's tags only. The library modules are tagged with their own prefix
+# (api/v0.9.1, sandbox/v0.9.1) and a `v*` filter does not match those — Go's module tags and a
+# product release are different events, and only the second one ships a binary.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Read by default; only the job that creates the release asks for more.
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  # A tag is not a promise that the tree passed anything: it can be cut from any commit, and the
+  # push that carries it runs no other workflow. So the gates run again here, and the release job
+  # does not start until they pass — a broken binary attached to a version number outlives the
+  # mistake by far longer than a failed run does.
+  gate:
+    name: Gates (linux, whole tree)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test
+
+  release:
+    name: Build and publish
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # The one platform built today. A second target means a matrix here and a second archive;
+      # deliberately not one yet, because a matrix of one entry hides which half is the variable.
+      # Named for the TARGET rather than GOOS/GOARCH: those would also apply to `go test` and every
+      # other go command in the job, silently, which is a different decision than this one.
+      TARGET_OS: linux
+      TARGET_ARCH: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+
+      # `make build` is the deployable trio and nothing else: the node binary, the control plane and
+      # the operator's CLI — the three names `node-tool apply` ships to a host. oci-layouts and
+      # genconfig are the by-hand half of the sandbox workflow (a developer's tools, built by
+      # `make all`), and shipping them here would say they are part of a deployment.
+      #
+      # The tag becomes the version the node binary reports back to the controller. `-X` on a
+      # binary that declares no such variable is ignored, so one LDFLAGS covers all three.
+      - name: make build
+        run: make build OS="$TARGET_OS" ARCH="$TARGET_ARCH" LDFLAGS="-s -w -X main.version=${GITHUB_REF_NAME}"
+
+      # One archive, holding the binaries under the names they must have on a node — node-tool finds
+      # them by name, so a per-platform suffix baked into the file would have to be undone by hand
+      # before the first apply. The suffix belongs to the archive.
+      - name: Package
+        run: |
+          set -eu
+          archive="horchestra_${GITHUB_REF_NAME}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          tar -czf "$archive" -C bin horchestra horchestra-controller node-tool
+          sha256sum "$archive" > SHA256SUMS
+          echo "archive=$archive" >> "$GITHUB_ENV"
+          cat SHA256SUMS
+
+      # gh is on the runner and is the whole dependency. Upload rather than create when the release
+      # already exists, so re-running this job after a failure finishes the job instead of refusing
+      # to start it.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" SHA256SUMS --clobber
+          else
+            args=(--generate-notes)
+            # A tag with a pre-release part (v0.9.2-rc1) is published as one: this is alpha
+            # software, and the release page should not imply otherwise by accident.
+            case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" "${args[@]}" "$archive" SHA256SUMS
+          fi

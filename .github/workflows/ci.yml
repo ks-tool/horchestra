@@ -1,10 +1,16 @@
-# CI for the horchestra workspace: six modules — api, controller, agent, netd, sandbox and the root
-# composition — plus hack/, which stands outside it.
+# CI for horchestra: six modules — api, controller, agent, netd, sandbox and the root composition —
+# plus hack/, which stands apart.
+#
+# NO WORKSPACE. The modules are published and resolve one another from the proxy, and that is the
+# thing worth testing: a workspace would redirect them at this checkout, hide every stale
+# requirement, and test something no consumer ever gets. What it costs is that a commit touching two
+# modules is gated against the sibling's last PUBLISHED tag — so a change to api reaches controller
+# only once api is tagged, and CI says so by failing until it is.
 #
 # Everything runs on ubuntu, and not for convenience: half this tree is behind //go:build linux
 # (systemd, D-Bus, overlayfs, user namespaces, netlink, BPF, seccomp) and carries no portability
 # stub, so a darwin host can only type-check it. On a linux runner those tests RUN — which the make
-# targets now decide by GOHOSTOS rather than by being told.
+# targets decide by GOHOSTOS rather than by being told.
 name: CI
 
 on:
@@ -44,20 +50,16 @@ jobs:
           # key by not being listed.
           cache-dependency-path: "**/go.sum"
 
-      # Before the workspace exists, because this is the one gate about life without it: each module
-      # must declare and hash the siblings it imports. Under a workspace those requirements are
-      # unnecessary and go stale unnoticed — which is exactly how a checkout of the published
-      # modules came to fail with `missing go.sum entry for .../api`, on a tree whose own CI was
-      # green.
+      # Each module must declare and hash the siblings it imports — which is what a checkout gets,
+      # and what a workspace hides: under one those requirements are unnecessary and go stale
+      # unnoticed, which is how a checkout of the published modules came to fail with `missing
+      # go.sum entry for .../api` on a tree whose own CI was green.
       - name: Every module resolves on its own
         run: |
           for m in . api controller agent netd sandbox hack; do
             echo "== $m"
             (cd "$m" && go mod tidy -diff)
           done
-
-      - name: Redirect the modules at this commit
-        run: go work init . ./api ./controller ./agent ./netd ./sandbox
 
       # gofmt over the whole tree + go vet per module (the linux-only three cross-vetted).
       - name: make lint
@@ -75,16 +77,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-
-      # The workspace is CREATED here and not committed. go.work is a developer's redirection of the
-      # modules at their working tree; publishing it would impose that redirection on consumers.
-      # CI needs the same redirection for the opposite reason: without it every module builds
-      # against its sibling's last PUBLISHED tag, so a commit changing api and controller together
-      # would be tested as new-api plus controller-against-old-api — which is not the thing anyone
-      # is about to merge. hack/ stays out of it: its testcontainers dependency belongs to nothing
-      # that ships, and `make test-hack` runs.
-      - name: Redirect the modules at this commit
-        run: go work init . ./api ./controller ./agent ./netd ./sandbox
 
       # `make test` = api, controller (-race), root + netd, hack, and — because GOHOSTOS is linux
       # here — agent and sandbox for real rather than type-checked. That last pair is the whole
