@@ -32,8 +32,8 @@ const fleetFileName = "node-tool.yaml"
 // while the operator is thinking about exactly that.
 func initCmd() *cobra.Command {
 	var (
-		dir, vaultPKI, controller string
-		agents, hosts             []string
+		dir, vaultPKI             string
+		controller, agents, hosts []string
 		localPKI                  bool
 		gateFlags                 []gateFlag
 	)
@@ -45,11 +45,22 @@ func initCmd() *cobra.Command {
 			// Which of the two was chosen is enforced by cobra's flag groups below — one is
 			// required, and both together are refused.
 
+			// One control plane, said here rather than at apply time: --controller is repeatable
+			// (pflag keeps every value), and a fleet named with two of them is a fleet whose
+			// operator expects something this does not do yet.
+			if len(controller) > 1 {
+				log.Fatal().Msg("HA not supported yet")
+			}
+			ctrl := ""
+			if len(controller) > 0 {
+				ctrl = controller[0]
+			}
+
 			// The controller's address belongs in the serving certificate whether or not it was
 			// also passed as a --host: an operator who named the controller once should not have
 			// to name it twice, and a certificate missing that SAN fails at the first kubectl.
-			if len(controller) > 0 {
-				hosts = append([]string{controller}, hosts...)
+			if ctrl != "" {
+				hosts = append([]string{ctrl}, hosts...)
 			}
 			if len(hosts) == 0 {
 				hosts = []string{"127.0.0.1", "localhost"}
@@ -103,7 +114,7 @@ func initCmd() *cobra.Command {
 				pkiDir:       dir,
 				vaultServer:  vaultPKI,
 				featureGates: resolveGates(cmd.Flags(), gateFlags, len(vaultPKI) > 0),
-				controller:   controller,
+				controller:   ctrl,
 				agents:       agents,
 			})
 			fatal(err, "render "+fleetFileName)
@@ -125,7 +136,7 @@ func initCmd() *cobra.Command {
 		"the controller signs node rotation CSRs itself, with the CA key uploaded to its host: nodes renew automatically, and a controller compromise discloses the CA")
 	fs.StringVar(&vaultPKI, "vault-pki", "",
 		"sign node CSRs through this Vault/OpenBao server instead (e.g. https://vault:8200), so the controller holds no signing key at all: renewal then stops while Vault is unreachable")
-	fs.StringVar(&controller, "controller", "", "address of the host that will run the control plane; also a SAN of the serving certificate")
+	fs.StringArrayVar(&controller, "controller", nil, "address of the host that will run the control plane; also a SAN of the serving certificate (one: HA is not supported yet)")
 	fs.StringArrayVar(&agents, "agent", nil, "address of a host that will run workloads; repeatable")
 	gateFlags = registerGateFlags(fs)
 
