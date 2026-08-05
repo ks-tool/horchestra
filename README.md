@@ -41,6 +41,32 @@ translated at the socket, before a packet exists — so there is no per-flow sta
 **Secrets stay in memory.** A resolved secret reaches a workload through RAM-backed carriers and its process
 environment. It is never written into the unit file, never to disk, and never readable over the message bus.
 
+## Security by design
+
+**Nothing privileged runs by default.** The agent holds no capabilities and enters its own user namespace
+unconditionally. Workloads run rootless, in namespaces of their own, from a read-only overlay root, with every
+capability set emptied. The seccomp filter is what keeps it that way: it denies the namespace and mount syscalls, so a
+workload cannot unshare a namespace of its own — where it would hold a full capability set again, and could mount a
+writable path over the read-only root. The one privileged component is a small network helper that exists precisely so
+the agent can hold nothing.
+
+**Privilege boundaries are process boundaries, and the compiler holds them.** The agent, the network helper and the
+workload sandbox are separate programs in separate Go modules, so a shortcut across a boundary is a build failure, not a
+code review comment. The helper's API is closed and typed — there is no "load this program" verb; it loads only what is
+compiled into its own binary and takes only data from the agent. The sandbox, the one program that becomes a workload's
+parent, has a single dependency and imports nothing else from the tree.
+
+**There is no way to turn authentication off.** No flag, no constant, no bypass type left in the code to construct.
+Every identity is a certificate — the first command an operator runs creates the PKI — and a node *is* its certificate:
+what it may read and write is decided by the name it was signed for, and one certificate buys exactly one live session.
+
+**An image is checked before a byte of it lands.** Every layer is digest-verified, the manifest's declared shape and
+each transfer's declared size are enforced up front, the unpacker refuses path and symlink traversal at write time, and
+a truncated layer is never adopted — it becomes visible whole or not at all.
+
+**Secrets stay in memory.** A resolved secret reaches a workload through RAM-backed carriers and its process
+environment. It is never written into the unit file, never to disk, and never readable over the message bus.
+
 ## What it looks like
 
 One file describes a fleet, two commands stand it up:
